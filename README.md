@@ -233,7 +233,7 @@ for epoch_num in range(parser.epochs):
 
 在第二步开始之前还是查看一下结果吧
 
-![first](D:\大三下\four\val\first.bmp)
+![first](.\pic\first.bmp)
 
 嗯嗯嗯，幸好查看了一下，发现完全认不出来了。
 
@@ -273,7 +273,7 @@ for epoch_num in range(parser.epochs):
 
 但还是有问题，如下原版图片：
 
-![1](D:\大三下\four\val\1.jpg)
+![1](.\pic\1.jpg)
 
 经过修改已经完成了
 
@@ -324,9 +324,9 @@ def resize_GT(img,annot,num):
 
 ```
 
-![2](D:\大三下\four\val\2.jpg)
+![2](.\pic\2.jpg)
 
-![3](D:\大三下\four\val\3.jpg)
+![3](.\pic\3.jpg)
 
 不过**确实出现了一开始想到的问题--重叠**。
 
@@ -552,22 +552,5 @@ self.contrastiveloss = losses.ContrastiveLoss(batch_size = 1,n_views = 2)
 **在模型中对于batch_size和n_views的设定必须要在文件retinanet/model.py中手动设定。这是一个小问题了。**
 
 > 2021-04-27 18:57
-
-### 第三部分：其他实现
-
-因为当前没有显卡使用，所以接下来继续完成一些代码，两个工作是可以做的：
-
-- 第一个工作：增加数据增广的手段，这一部分要做的话主要在 DataLoader中的collate_fn函数中实现，原本在这里实现的功能是将数据copy一份作为对比
-  - 具体的工作就是将GT拉伸之后之后填进去，之后就作为用来对比的图像，问题在于GT可能会进行重叠、覆盖。
-  - 能做的事情就是对对比的图像进行其他的数据增广操作，比如扭曲、翻转之类的，扭曲简单，翻转还需要对于annto进行修改还有些麻烦
-- 第二个工作：我觉得这个工作应该才是我接下来在拿到显卡之前要做的工作。
-
-
-
-
-
-
-
-
 
 未来可以做的是将每一个类别的GT都单独存起来，然后训练对比的时候，就从同类别的GT中随机抓一个拉伸之后填进对应的GT之中。
