@@ -1,6 +1,3 @@
-# FocalContrastiveLoss
-Contrast learning is achieved on Focal loss
-
 # 代码修改记录
 
 ## 2021-04-23
@@ -233,7 +230,7 @@ for epoch_num in range(parser.epochs):
 
 在第二步开始之前还是查看一下结果吧
 
-![first](.\pic\first.bmp)
+![first](D:\大三下\four\val\first.bmp)
 
 嗯嗯嗯，幸好查看了一下，发现完全认不出来了。
 
@@ -273,7 +270,7 @@ for epoch_num in range(parser.epochs):
 
 但还是有问题，如下原版图片：
 
-![1](.\pic\1.jpg)
+![1](D:\大三下\four\val\1.jpg)
 
 经过修改已经完成了
 
@@ -324,9 +321,9 @@ def resize_GT(img,annot,num):
 
 ```
 
-![2](.\pic\2.jpg)
+![2](D:\大三下\four\val\2.jpg)
 
-![3](.\pic\3.jpg)
+![3](D:\大三下\four\val\3.jpg)
 
 不过**确实出现了一开始想到的问题--重叠**。
 
@@ -478,6 +475,7 @@ similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representa
 大概查出问题来了，这个在代码写出来后说明，下面是整个对比学习在文件retinanet/losses/py中：
 
 ```python
+
 class ContrastiveLoss(nn.Module):
     def __init__(self,batch_size,n_views,temperature = 0.5):
         super().__init__()
@@ -561,49 +559,13 @@ self.contrastiveloss = losses.ContrastiveLoss(batch_size = 1,n_views = 2)
   - 具体的工作就是将GT拉伸之后之后填进去，之后就作为用来对比的图像，问题在于GT可能会进行重叠、覆盖。
   - 能做的事情就是对对比的图像进行其他的数据增广操作，比如扭曲、翻转之类的，扭曲简单，翻转还需要对于annto进行修改还有些麻烦
 - 第二个工作：我觉得这个工作应该才是我接下来在拿到显卡之前要做的工作。
-  - 把对比学习的loss记录下来（既然都已经记录对比学习的loss了，那么分类和回归的loss呢？）
-    - 分类和回归的loss的话估计就记录一个batch的吧，因为没办法分开来。
 
-#### 记录loss
 
-记录这个loss的大概规划按照如下的想法：
 
-- 数据的存储只能够按照一个batch一个batch的存储，用单独一个文件来存储就ok了，只不过需要传入一个文件f的参数。
 
-- 记录格式如下：
 
-  > size contrastiveloss in P3 | size contrastiveloss in P4 | …… |size contrastiveloss in P7| classification_loss | regression_loss | 
-  >
-  > size contrastiveloss in P3 | size contrastiveloss in P4 | …… |size contrastiveloss in P7| classification_loss | regression_loss |
 
-这一部分的实现倒不是那么困难，只要在train1.py里面创建一个文件f，然后把参数传到Resnet模型里面就好了。
-
-### 第四部分 优化
-
-为什么需要这一步，其实非常现实的，因为在本地计算这一个的时候大概花费的时间在接近八秒：
-
-- 这意味着以2大小的batch_size计算完118287个样本的对比loss的时间大概在（118287/2）/8/3600/24 = 5.47625（天）
-- 这就是说跑一个epoch中单纯是计算对比的loss就需要5.4天，更别说其他的图片拥有的GT可能更多，所以这个地方必须优化。
-
-首先思考为什么跑的慢的：
-
-- 第一，有可能没有用上cuda的原因。
-  - 用了cuda之后反而更慢了是什么道理？原本花费的时间也就接近8秒，最高也才7.8秒，使用cuda之后直接超出8秒
-  - 有可能是加载cuda反而消耗了时间，跑100次然后平均一下结果，结果为：
-    - Time is  0.5151817631721497
-  - 现在尝试一下没有使用cuda跑100次评价一下的结果：
-    - emmmm，等了好久都没有出现结果
-    - Time is  7.016696767807007
-  - 可以看得出在cuda上运算和平时的运算还是有很大的差距的。
-  - 不过即使在cuda上运算，按照（118287/2）/8/3600 = 8.214375（小时）
-    - 也挺慢的，所以还是需要进行优化
-  - 然后在这个地方使用了cuda为了防止显存不够最好还是在函数运行完之后删除掉，不过具体不知道显存够不够，现在还没有等到显卡（2021年4月28日14点31分）
-- 第二，在对比学习的loss中没有使用向量化的原因
-  - 向量化的运算当然更快，但是为什么不进行向量化呢？
-  - 主要原因在于：我们计算的是GT的loss，但是每一个GT都是不一样大小的，这意味着，做不到向量化计算
-  - 有一个想法，按照GT里面最大的框进行填充0或者1，不知道是否对最终的结果有所影响，这一部分需要进行实验的。
 
 
 
 未来可以做的是将每一个类别的GT都单独存起来，然后训练对比的时候，就从同类别的GT中随机抓一个拉伸之后填进对应的GT之中。
-

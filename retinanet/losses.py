@@ -185,66 +185,56 @@ class FocalLoss(nn.Module):
         return torch.stack(classification_losses).mean(dim=0, keepdim=True), torch.stack(regression_losses).mean(dim=0, keepdim=True)
 
 class ContrastiveLoss(nn.Module):
+    # def __init__(self,batch_size,n_views,f,temperature = 0.5):
     def __init__(self,batch_size,n_views,temperature = 0.5):
         super().__init__()
         self.batch_size = batch_size
+        # self.f = f
         self.n_view = n_views
         self.register_buffer("temperature", torch.tensor(temperature))
+        # self.register_buffer("negatives_mask", (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float().cuda())
         self.register_buffer("negatives_mask", (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float())
     def calc_GT(self,emb_i,emb_j):
-        print("Emb ",emb_i.shape,emb_j.shape)
+        if(emb_i.shape[1] == 0 or emb_i.shape[2] == 0):
+            return torch.zeros(0.0)
+        # z_i = F.normalize(emb_i, dim = 1).cuda()
+        # z_j = F.normalize(emb_j, dim = 1).cuda()
         z_i = F.normalize(emb_i, dim = 1)
         z_j = F.normalize(emb_j, dim = 1)
         
         representations = torch.cat([z_i,z_j], dim = 0)
         representations = representations.view(representations.shape[0],-1)
-        # similarity_matrix = representations.mm(representations.t())
         similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0), dim=2)
-        
         
         sim_ij = torch.diag(similarity_matrix, self.batch_size)
         sim_ji = torch.diag(similarity_matrix, -self.batch_size)
-        print("similarity_matrix",similarity_matrix)
         positives = torch.cat([sim_ij, sim_ji], dim=0)
-        print("positives ",positives)
-        # nominator = torch.log(positives / self.temperature)
         nominator = torch.exp(positives / self.temperature)
-        print("nominator ",nominator)
         
         denominator = self.negatives_mask * torch.exp(similarity_matrix / self.temperature)
 
-        print("denominator ",denominator)
         loss_partial = -torch.log(nominator / torch.sum(denominator, dim=1))
-        print("loss_partial ",loss_partial)
         loss = torch.sum(loss_partial) / (2 * self.batch_size)
-        print("loss is ",loss)
         return loss
     def calc_one(self,emb_i,emb_j,annotation):
-        loss = torch.tensor(0.0)
-        print(annotation.shape)
-        print(emb_i.shape,emb_j.shape)
+        loss = torch.tensor(0.0).cuda()
         for batch in range(self.batch_size):
-            print("The batch is ",batch)
             for i in annotation[batch,:,:]:
-                print("="*50)
-                print(i)
                 loss += self.calc_GT(emb_i[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])],emb_j[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])])
             loss /= annotation.shape[1]
-        print("-"*50)
         return loss/self.batch_size
     def forward(self,features,annotations):
         new_index = torch.arange(0,self.batch_size) * self.n_view
-        print("new_index is ",new_index)
+        # emb size : [(batch size , channels , width ,height ) , …… , (batch size , channels , width ,height )]
         emb_i = [feature[new_index] for feature in features]
         emb_j = [feature[new_index+1] for feature in features]
+        
         length= len(features)
-        print("The length is ",length)
+        # annot size : [(batch_size, nums of GT , 5)]
         annot = [annotation[new_index] for annotation in annotations]
         contrastiveloss = torch.tensor(0.0)
-        print("annot shape ",annot[0].shape)
         for i in range(length):
-            # print(i,annotations[new_index])
+            # contrastiveloss += self.calc_one(emb_i[i].cuda(),emb_j[i].cuda(),annot[i])
             contrastiveloss += self.calc_one(emb_i[i],emb_j[i],annot[i])
-            # contrastiveloss += self.calc_GT(emb_i[i],emb_j[i])
-            print("contrastiveloss is ",contrastiveloss)
+            print("contrastiveloss",contrastiveloss)
         return contrastiveloss / length
