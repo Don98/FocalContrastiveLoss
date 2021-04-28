@@ -554,3 +554,5 @@ self.contrastiveloss = losses.ContrastiveLoss(batch_size = 1,n_views = 2)
 > 2021-04-27 18:57
 
 未来可以做的是将每一个类别的GT都单独存起来，然后训练对比的时候，就从同类别的GT中随机抓一个拉伸之后填进对应的GT之中。
+
+> 2021年4月28日15点11分

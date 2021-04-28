@@ -192,7 +192,7 @@ class ContrastiveLoss(nn.Module):
         self.register_buffer("temperature", torch.tensor(temperature))
         self.register_buffer("negatives_mask", (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float())
     def calc_GT(self,emb_i,emb_j):
-        print("Emb ",emb_i.shape,emb_j.shape)
+        # print("Emb ",emb_i.shape,emb_j.shape)
         z_i = F.normalize(emb_i, dim = 1)
         z_j = F.normalize(emb_j, dim = 1)
         
@@ -204,33 +204,33 @@ class ContrastiveLoss(nn.Module):
         
         sim_ij = torch.diag(similarity_matrix, self.batch_size)
         sim_ji = torch.diag(similarity_matrix, -self.batch_size)
-        print("similarity_matrix",similarity_matrix)
+        # print("similarity_matrix",similarity_matrix)
         positives = torch.cat([sim_ij, sim_ji], dim=0)
-        print("positives ",positives)
+        # print("positives ",positives)
         # nominator = torch.log(positives / self.temperature)
         nominator = torch.exp(positives / self.temperature)
-        print("nominator ",nominator)
+        # print("nominator ",nominator)
         
         denominator = self.negatives_mask * torch.exp(similarity_matrix / self.temperature)
 
-        print("denominator ",denominator)
+        # print("denominator ",denominator)
         loss_partial = -torch.log(nominator / torch.sum(denominator, dim=1))
-        print("loss_partial ",loss_partial)
+        # print("loss_partial ",loss_partial)
         loss = torch.sum(loss_partial) / (2 * self.batch_size)
-        print("loss is ",loss)
+        # print("loss is ",loss)
         return loss
     def calc_one(self,emb_i,emb_j,annotation):
         loss = torch.tensor(0.0)
-        print(annotation.shape)
-        print(emb_i.shape,emb_j.shape)
+        # print(annotation.shape)
+        # print(emb_i.shape,emb_j.shape)
         for batch in range(self.batch_size):
-            print("The batch is ",batch)
+            # print("The batch is ",batch)
             for i in annotation[batch,:,:]:
-                print("="*50)
-                print(i)
+                # print("="*50)
+                # print(i)
                 loss += self.calc_GT(emb_i[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])],emb_j[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])])
             loss /= annotation.shape[1]
-        print("-"*50)
+        # print("-"*50)
         return loss/self.batch_size
     def forward(self,features,annotations):
         new_index = torch.arange(0,self.batch_size) * self.n_view
