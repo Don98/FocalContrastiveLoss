@@ -558,14 +558,362 @@ self.contrastiveloss = losses.ContrastiveLoss(batch_size = 1,n_views = 2)
 - 第一个工作：增加数据增广的手段，这一部分要做的话主要在 DataLoader中的collate_fn函数中实现，原本在这里实现的功能是将数据copy一份作为对比
   - 具体的工作就是将GT拉伸之后之后填进去，之后就作为用来对比的图像，问题在于GT可能会进行重叠、覆盖。
   - 能做的事情就是对对比的图像进行其他的数据增广操作，比如扭曲、翻转之类的，扭曲简单，翻转还需要对于annto进行修改还有些麻烦
+  
 - 第二个工作：我觉得这个工作应该才是我接下来在拿到显卡之前要做的工作。
 
+  - 数据的保存，在train1.py中创建文件f，然后将参数传入进去就可以了，唯一的问题就是写数据似乎会5hki 增加一些训练时间的样子
 
+    - 在经过实验之后，发现写数据似乎没有增加run的时间，暂时不关注了
 
+  - 写数据的格式如下：
 
+  - > size contrastiveloss in P3 | size contrastiveloss in P4 | …… |size contrastiveloss  in P7 | classification_loss | regression_loss
+    >
+    > size contrastiveloss in P3 | size contrastiveloss in P4 | …… |size contrastiveloss  in P7 | classification_loss | regression_loss
 
+  - 这一部分的实现还是比较简单的。
 
+### 第四部分：优化
+
+> 事实上，完全没有想到这一部分被覆盖了，导致这一部分开始的内容都没有了，不过没有关系，可以慢慢恢复，大致按照我的思路进行恢复吧，能恢复多少事多少。
+
+因为显卡拿不到我现在只能够尝试对于对比学习的一些内容进行优化了，优化的可以从两个方面进行的。
+
+#### 第一个方面：采用cuda运算
+
+- 可能是因为没有采用cuda运算所以非常的慢，大概在7~8秒，如果按照(118287/2)*8/3600/24 = 5.47625（天）的话，这代价显然是不能够承受的，而且这单独只是对比学习的loss的计算就花费这么多少时间了。（而且测试用的一个batch的图像还是GT非常少的）
+
+- 于是采用cuda来进行运算，然后发现时间在8秒以上。
+
+  - > Time is  8.58696460723877
+
+- 单独采用一个运算可能不太精确，因为cuda的加载可能比较费时，将结果运行100次之后取平均查看在cuda上的结果：
+
+  - > Time is  0.5151817631721497
+
+- 然后是接下来对于不在cuda上的运行结果，运行100次，时间有点久，平均下来结果：
+
+  - > Time is  7.016696767807007
+
+- 在cuda的运算似乎可以接受的，但是一计算之后会发现(118287/2)*0.5/3600 = 8.214375(小时)
+
+  - 也就是说运算一个epoch光是算对比学习的loss就需要花费八个小时，好像又不太能接受了。
+
+- 显示情况花费的时间只多不少，所以我们还需要优化。
+
+#### 第二个方面：向量化运算
+
+- 其实向量化运算在一开始写代码的时候就应该想到的，但是向量化运算在这里有一个很大的问题就是，因为我们计算的是不同的GT这意味着输入进来的图像矩阵是不一样规格的，也就是说不能够采取向量化运算了。
+
+- 有一个想法，对于不够大的GT进行像素的补充（补充0不会影响结果,如下，第三个loss没有变化），然后整一个进行向量化运算的。
+
+  - > a = torch.Size([4, 3, 928, 640])
+    > Emb  torch.Size([2, 3, 134, 221]) torch.Size([2, 3, 134, 221])
+    > tensor(1.3351)
+    > b = Emb  torch.Size([2, 3, 569, 609]) torch.Size([2, 3, 569, 609])
+    > tensor(1.1856)
+    > a = Emb  torch.Size([2, 3, 716, 656]) torch.Size([2, 3, 716, 656])
+    > tensor(1.3351)
+
+- 存在另一个问题：那就是在padding每一个GT的时候其实也进行了for的循环，也就说效率也会降下来的，就是不知道会降多少了，这个得具体实验之后才之后，所以接下来就是具体的实现了。
+
+具体实现如下：
+
+- 第一步，找出GT里面最大的保存起来。
+- 第二步，将所有的GT补0到最大的那个框。
+
+第一步实现的代码是把图像补全到指定size 的函数，实现如下：
+
+```python
+def to_padding(a,b,old_size,new_size):
+    dx , dy = new_size[0] - old_size[0],new_size[1] - old_size[1]
+    l , u = dx // 2, dy // 2
+    r , d = dx - l, dy - u
+    pad = torch.nn.ZeroPad2d(padding=(u, d, l, r))
+    return pad(a),pad(b)
+```
+
+a、b是两张用来互相对比的图片，然后old_size是原本的大小，new_size是新的大小。
+
+接下来实现的是，循环所有的框，然后拼接起来成为一个（GT num, max width ， max height）的两个tensor
+
+然后接下里的实现是，输入两个图像，然后把所有的GT拼接起来。
+
+```python
+def to_padding(a,b,annotation):
+    annotation = annotation.long()
+    size = (annotation[:,:,2] - annotation[:,:,0]) * (annotation[:,:,3] - annotation[:,:,1])
+    size = torch.flatten(size)
+    size_max, size_argmax = torch.max(size,dim = 0)
+    index = size_argmax
+    x = index // annotation.shape[0]
+    y = index % annotation.shape[0]
+    new_size = (annotation[x,y,2] - annotation[x,y,0],annotation[x,y,3] - annotation[x,y,1])
+    img_i , img_j = np.zeros((0, a.shape[1],new_size[0],new_size[1])),np.zeros((0, a.shape[1],new_size[0],new_size[1]))
+    for i in range(a.shape[0]):
+        for j in annotation[i,:,:]:
+            box = j
+            x0,y0,x1,y1 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
+            embi, embj = to_padding_one(a[i,:,x0:x1,y0:y1],b[i,:,x0:x1,y0:y1],a[i,:,x0:x1,y0:y1].shape[1:],new_size)
+            img_i = np.append(img_i,embi.unsqueeze(0),axis = 0) 
+            img_j = np.append(img_j,embj.unsqueeze(0),axis = 0) 
+            return img_i,img_j
+```
+
+经过测试，暂时没有问题的了，需要修改的一个地方是，不能够取面积最大的那个框来确定，而是应该改变取法：
+
+- 变为width取width中最大的，height取height中最大的。
+
+代码修改如下：
+
+```python
+def to_padding(a,b,annotation):
+    annotation = annotation.long()
+    width  = torch.flatten(annotation[:,:,2] - annotation[:,:,0])
+    height = torch.flatten(annotation[:,:,3] - annotation[:,:,1])
+    width  = torch.max(width,dim = 0)[0]
+    height = torch.max(height,dim = 0)[0]
+
+    new_size = (width,height)
+    img_i , img_j = np.zeros((0, a.shape[1],new_size[0],new_size[1])),np.zeros((0, a.shape[1],new_size[0],new_size[1]))
+    for i in range(a.shape[0]):
+        for j in annotation[i,:,:]:
+            box = j
+            x0,y0,x1,y1 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
+            embi, embj = to_padding_one(a[i,:,x0:x1,y0:y1],b[i,:,x0:x1,y0:y1],a[i,:,x0:x1,y0:y1].shape[1:],new_size)
+            img_i = np.append(img_i,embi.unsqueeze(0),axis = 0) 
+            img_j = np.append(img_j,embj.unsqueeze(0),axis = 0) 
+    return torch.from_numpy(img_i),torch.from_numpy(img_j)
+```
+
+然后这一部分完成了，接下来就是把其写入到retinanet/losses.py中，有一个需要注意的问题就是，一开始在ContrastiveLoss预设的batch_size必须要进行修改，变成不需要预设的输入了，需要在计算的时候动态决定了，因为每一个batch的GT数量不一定一致,但是因为其他地方也用到了，所以还是不删除这一个参数。
+
+同时因为插入之后和原本的运行结构不一致了，需要修改forward函数的内容，
+
+```python
+class ContrastiveLoss(nn.Module):
+    # def __init__(self,batch_size,n_views,f,temperature = 0.5):
+    def __init__(self,batch_size,n_views,temperature = 0.5):
+        super().__init__()
+        self.batch_size = batch_size
+        # self.f = f
+        
+        self.n_view = n_views
+        self.register_buffer("temperature", torch.tensor(temperature))
+        
+    def calc_GT(self,emb_i,emb_j):
+        # print("Emb ",emb_i.shape,emb_j.shape)
+        batch_size = emb_i.shape[0]
+        self.negatives_mask = (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float()
+        # self.negatives_mask = (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float().cuda()
+        if(emb_i.shape[1] == 0 or emb_i.shape[2] == 0):
+            return torch.zeros(0.0)
+        # z_i = F.normalize(emb_i, dim = 1).cuda()
+        # z_j = F.normalize(emb_j, dim = 1).cuda()
+        z_i = F.normalize(emb_i, dim = 1)
+        z_j = F.normalize(emb_j, dim = 1)
+        
+        representations = torch.cat([z_i,z_j], dim = 0)
+        representations = representations.view(representations.shape[0],-1)
+        similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0), dim=2)
+        # print("similarity_matrix",similarity_matrix)
+        
+        sim_ij = torch.diag(similarity_matrix, batch_size)
+        sim_ji = torch.diag(similarity_matrix, -batch_size)
+        positives = torch.cat([sim_ij, sim_ji], dim=0)
+        nominator = torch.exp(positives / self.temperature)
+        # print("positives",positives)
+        
+        denominator = self.negatives_mask * torch.exp(similarity_matrix / self.temperature)
+
+        loss_partial = -torch.log(nominator / torch.sum(denominator, dim=1))
+        # print("loss_partial",loss_partial)
+        loss = torch.sum(loss_partial) / (2 * batch_size)
+        return loss
+    def to_padding_one(a,b,old_size,new_size):
+        # print(a.shape,b.shape,old_size,new_size)
+        dx , dy = new_size[0] - old_size[0],new_size[1] - old_size[1]
+        l , u = dx // 2, dy // 2
+        r , d = dx - l, dy - u
+        pad = torch.nn.ZeroPad2d(padding=(u, d, l, r))
+        return pad(a),pad(b)
+    def to_padding(a,b,annotation):
+        annotation = annotation.long()
+        width  = torch.flatten(annotation[:,:,2] - annotation[:,:,0])
+        height = torch.flatten(annotation[:,:,3] - annotation[:,:,1])
+        width  = torch.max(width,dim = 0)[0]
+        height = torch.max(height,dim = 0)[0]
+
+        new_size = (width,height)
+        img_i , img_j = np.zeros((0, a.shape[1],new_size[0],new_size[1])),np.zeros((0, a.shape[1],new_size[0],new_size[1]))
+        for i in range(a.shape[0]):
+            for j in annotation[i,:,:]:
+                box = j
+                x0,y0,x1,y1 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
+                embi, embj = self.to_padding_one(a[i,:,x0:x1,y0:y1],b[i,:,x0:x1,y0:y1],a[i,:,x0:x1,y0:y1].shape[1:],new_size)
+                img_i = np.append(img_i,embi.unsqueeze(0),axis = 0) 
+                img_j = np.append(img_j,embj.unsqueeze(0),axis = 0) 
+        return torch.from_numpy(img_i),torch.from_numpy(img_j)
+    def calc_one(self,emb_i,emb_j,annotation):
+        # loss = torch.tensor(0.0).cuda()
+        loss = torch.tensor(0.0)
+        for batch in range(self.batch_size):
+            for i in annotation[batch,:,:]:
+                loss += self.calc_GT(emb_i[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])],emb_j[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])])
+            # print("loss0",loss)
+            loss /= annotation.shape[1]
+        # print("loss1",loss)
+        return loss/self.batch_size
+    def forward(self,features,annotations):
+        new_index = torch.arange(0,self.batch_size) * self.n_view
+        # emb size : [(batch size , channels , width ,height ) , …… , (batch size , channels , width ,height )]
+        emb_i = [feature[new_index] for feature in features]
+        emb_j = [feature[new_index+1] for feature in features]
+        
+        length= len(features)
+        # annot size : [(batch_size, nums of GT , 5)]
+        annot = [annotation[new_index] for annotation in annotations]
+        contrastiveloss = torch.tensor(0.0)
+        for i in range(length):
+            # contrastiveloss += self.calc_one(emb_i[i].cuda(),emb_j[i].cuda(),annot[i])
+            # contrastiveloss += self.calc_one(emb_i[i],emb_j[i],annot[i])
+            img_i,img_j = self.to_padding(emb_i[i],emb_j[i],annot[i])
+            loss += self.calc_GT(img_i,img_j)
+            print("contrastiveloss",contrastiveloss)
+        return contrastiveloss / length
+```
+
+完了，运行到一半已经觉得速度非常慢了，输出的结果，如下：
+
+> Num training images: 118287
+> contrastiveloss tensor(2.4368)
+> contrastiveloss tensor(4.8736)
+> contrastiveloss tensor(7.3105)
+> contrastiveloss tensor(9.7473)
+> contrastiveloss tensor(12.1841)
+> Time is  30.39502787590027
+> tensor(2.4368)
+
+下面是没有使用这个方法的输出和速度：
+
+> Num training images: 118287
+> contrastiveloss tensor(0.7249)
+> contrastiveloss tensor(1.4497)
+> contrastiveloss tensor(2.1746)
+> contrastiveloss tensor(2.8994)
+> contrastiveloss tensor(3.6243)
+> Time is  7.372162342071533
+> tensor(0.7249)
+
+改进方案也只是我想当然了？等一下再看一下是和cuda有没有关系，但是现在存在的一个问题就是loss不一致的问题，等等再想这个问题吧，先对比一下使用cuda和不使用cuda的速度。
+
+不使用这个方法的时候,在运行了100次之后的结果如下：
+
+> Time is  0.5721215438842774
+> tensor(0.7249)
+
+哦吼，循环处理GT的部分还不能够放上cuda处理，估计莫得了
+
+> 没有结果，直接爆显存了
+>
+> RuntimeError: CUDA out of memory. Tried to allocate 3.08 GiB (GPU 0; 10.76 GiB total capacity; 590.49 MiB already allocated; 2.17 GiB free; 600.00 MiB reserved in total by PyTorch)
+
+看来是没有办法向量化的了，那么loss出现的问题也就不解决了。
+
+**这一部分是优化失败了只能希望在cuda上的计算速度足够给力了。**
+
+### 第五部分：完成
+
+如下是完成后的retinanet/losses.py(PS:一不小心删掉了文件功能)
+
+```python
+
+class ContrastiveLoss(nn.Module):
+    # def __init__(self,batch_size,n_views,f,temperature = 0.5):
+    def __init__(self,batch_size,n_views,temperature = 0.5):
+        super().__init__()
+        self.batch_size = batch_size
+        # self.f = f
+        
+        self.n_view = n_views
+        self.register_buffer("temperature", torch.tensor(temperature))
+        
+    def calc_GT(self,emb_i,emb_j):
+        batch_size = emb_i.shape[0]
+        if torch.cuda.is_available():
+            self.negatives_mask = (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float().cuda()
+        else:
+            self.negatives_mask = (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float().cuda()
+        if(emb_i.shape[1] == 0 or emb_i.shape[2] == 0):
+            return torch.zeros(0.0)
+        z_i = F.normalize(emb_i, dim = 1)
+        z_j = F.normalize(emb_j, dim = 1)
+        
+        representations = torch.cat([z_i,z_j], dim = 0)
+        representations = representations.view(representations.shape[0],-1)
+        similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0), dim=2)
+        
+        sim_ij = torch.diag(similarity_matrix, batch_size)
+        sim_ji = torch.diag(similarity_matrix, -batch_size)
+        positives = torch.cat([sim_ij, sim_ji], dim=0)
+        nominator = torch.exp(positives / self.temperature)
+        
+        denominator = self.negatives_mask * torch.exp(similarity_matrix / self.temperature)
+
+        loss_partial = -torch.log(nominator / torch.sum(denominator, dim=1))
+        loss = torch.sum(loss_partial) / (2 * batch_size)
+        return loss
+    def calc_one(self,emb_i,emb_j,annotation):
+        if torch.cuda.is_available():
+            loss = torch.tensor(0.0).cuda()
+        else:
+            loss = torch.tensor(0.0)
+        for batch in range(self.batch_size):
+            for i in annotation[batch,:,:]:
+                loss += self.calc_GT(emb_i[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])],emb_j[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])])
+            loss /= annotation.shape[1]
+            
+        return loss/self.batch_size
+    def to_padding_one(self,a,b,old_size,new_size):
+        dx , dy = new_size[0] - old_size[0],new_size[1] - old_size[1]
+        l , u = dx // 2, dy // 2
+        r , d = dx - l, dy - u
+        pad = torch.nn.ZeroPad2d(padding=(u, d, l, r))
+        return pad(a),pad(b)
+    def to_padding(self,a,b,annotation):
+        annotation = annotation.long()
+        width  = torch.flatten(annotation[:,:,2] - annotation[:,:,0])
+        height = torch.flatten(annotation[:,:,3] - annotation[:,:,1])
+        width  = torch.max(width,dim = 0)[0]
+        height = torch.max(height,dim = 0)[0]
+
+        new_size = (width,height)
+        img_i , img_j = np.zeros((0, a.shape[1],new_size[0],new_size[1])),np.zeros((0, a.shape[1],new_size[0],new_size[1]))
+        for i in range(a.shape[0]):
+            for j in annotation[i,:,:]:
+                box = j
+                x0,y0,x1,y1 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
+                embi, embj = self.to_padding_one(a[i,:,x0:x1,y0:y1],b[i,:,x0:x1,y0:y1],a[i,:,x0:x1,y0:y1].shape[1:],new_size)
+                img_i = np.append(img_i,embi.unsqueeze(0),axis = 0) 
+                img_j = np.append(img_j,embj.unsqueeze(0),axis = 0) 
+        return torch.from_numpy(img_i),torch.from_numpy(img_j)
+    def forward(self,features,annotations):
+        new_index = torch.arange(0,self.batch_size) * self.n_view
+        emb_i = [feature[new_index] for feature in features]
+        emb_j = [feature[new_index+1] for feature in features]
+        
+        length= len(features)
+        annot = [annotation[new_index] for annotation in annotations]
+        contrastiveloss = torch.tensor(0.0)
+        for i in range(length):
+            if torch.cuda.is_available():
+                contrastiveloss += self.calc_one(emb_i[i].cuda(),emb_j[i].cuda(),annot[i])
+            else:
+                contrastiveloss += self.calc_one(emb_i[i],emb_j[i],annot[i])
+        return contrastiveloss / length
+```
 
 
 
 未来可以做的是将每一个类别的GT都单独存起来，然后训练对比的时候，就从同类别的GT中随机抓一个拉伸之后填进对应的GT之中。
+

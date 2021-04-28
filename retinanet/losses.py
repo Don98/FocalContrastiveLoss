@@ -190,15 +190,18 @@ class ContrastiveLoss(nn.Module):
         super().__init__()
         self.batch_size = batch_size
         # self.f = f
+        
         self.n_view = n_views
         self.register_buffer("temperature", torch.tensor(temperature))
-        # self.register_buffer("negatives_mask", (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float().cuda())
-        self.register_buffer("negatives_mask", (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float())
+        
     def calc_GT(self,emb_i,emb_j):
+        batch_size = emb_i.shape[0]
+        if torch.cuda.is_available():
+            self.negatives_mask = (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float().cuda()
+        else:
+            self.negatives_mask = (~torch.eye(batch_size * 2, batch_size * 2, dtype=bool)).float().cuda()
         if(emb_i.shape[1] == 0 or emb_i.shape[2] == 0):
             return torch.zeros(0.0)
-        # z_i = F.normalize(emb_i, dim = 1).cuda()
-        # z_j = F.normalize(emb_j, dim = 1).cuda()
         z_i = F.normalize(emb_i, dim = 1)
         z_j = F.normalize(emb_j, dim = 1)
         
@@ -206,35 +209,61 @@ class ContrastiveLoss(nn.Module):
         representations = representations.view(representations.shape[0],-1)
         similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0), dim=2)
         
-        sim_ij = torch.diag(similarity_matrix, self.batch_size)
-        sim_ji = torch.diag(similarity_matrix, -self.batch_size)
+        sim_ij = torch.diag(similarity_matrix, batch_size)
+        sim_ji = torch.diag(similarity_matrix, -batch_size)
         positives = torch.cat([sim_ij, sim_ji], dim=0)
         nominator = torch.exp(positives / self.temperature)
         
         denominator = self.negatives_mask * torch.exp(similarity_matrix / self.temperature)
 
         loss_partial = -torch.log(nominator / torch.sum(denominator, dim=1))
-        loss = torch.sum(loss_partial) / (2 * self.batch_size)
+        loss = torch.sum(loss_partial) / (2 * batch_size)
         return loss
     def calc_one(self,emb_i,emb_j,annotation):
-        loss = torch.tensor(0.0).cuda()
+        if torch.cuda.is_available():
+            loss = torch.tensor(0.0).cuda()
+        else:
+            loss = torch.tensor(0.0)
         for batch in range(self.batch_size):
             for i in annotation[batch,:,:]:
                 loss += self.calc_GT(emb_i[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])],emb_j[:,:,int(i[0]):int(i[2]),int(i[1]):int(i[3])])
             loss /= annotation.shape[1]
+            
         return loss/self.batch_size
+    def to_padding_one(self,a,b,old_size,new_size):
+        dx , dy = new_size[0] - old_size[0],new_size[1] - old_size[1]
+        l , u = dx // 2, dy // 2
+        r , d = dx - l, dy - u
+        pad = torch.nn.ZeroPad2d(padding=(u, d, l, r))
+        return pad(a),pad(b)
+    def to_padding(self,a,b,annotation):
+        annotation = annotation.long()
+        width  = torch.flatten(annotation[:,:,2] - annotation[:,:,0])
+        height = torch.flatten(annotation[:,:,3] - annotation[:,:,1])
+        width  = torch.max(width,dim = 0)[0]
+        height = torch.max(height,dim = 0)[0]
+
+        new_size = (width,height)
+        img_i , img_j = np.zeros((0, a.shape[1],new_size[0],new_size[1])),np.zeros((0, a.shape[1],new_size[0],new_size[1]))
+        for i in range(a.shape[0]):
+            for j in annotation[i,:,:]:
+                box = j
+                x0,y0,x1,y1 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
+                embi, embj = self.to_padding_one(a[i,:,x0:x1,y0:y1],b[i,:,x0:x1,y0:y1],a[i,:,x0:x1,y0:y1].shape[1:],new_size)
+                img_i = np.append(img_i,embi.unsqueeze(0),axis = 0) 
+                img_j = np.append(img_j,embj.unsqueeze(0),axis = 0) 
+        return torch.from_numpy(img_i),torch.from_numpy(img_j)
     def forward(self,features,annotations):
         new_index = torch.arange(0,self.batch_size) * self.n_view
-        # emb size : [(batch size , channels , width ,height ) , …… , (batch size , channels , width ,height )]
         emb_i = [feature[new_index] for feature in features]
         emb_j = [feature[new_index+1] for feature in features]
         
         length= len(features)
-        # annot size : [(batch_size, nums of GT , 5)]
         annot = [annotation[new_index] for annotation in annotations]
         contrastiveloss = torch.tensor(0.0)
         for i in range(length):
-            # contrastiveloss += self.calc_one(emb_i[i].cuda(),emb_j[i].cuda(),annot[i])
-            contrastiveloss += self.calc_one(emb_i[i],emb_j[i],annot[i])
-            print("contrastiveloss",contrastiveloss)
+            if torch.cuda.is_available():
+                contrastiveloss += self.calc_one(emb_i[i].cuda(),emb_j[i].cuda(),annot[i])
+            else:
+                contrastiveloss += self.calc_one(emb_i[i],emb_j[i],annot[i])
         return contrastiveloss / length
